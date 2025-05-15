@@ -1,0 +1,25 @@
+[package]
+name = "rust-dns-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust SDK for interacting with DNS services"
+license = "GPL-3"
+authors = ["fantasy135 <zhao.h2018@gmail.com>"]
+repository = "https://github.com/fantasy135/rust-dns-sdk"
+readme = "README.md"
+keywords = ["dns", "sdk", "networking"]
+categories = ["network-programming", "api-bindings"]
+#作者信息可根据实际情况添加
+#authors = ["Your Name <your.email@example.com>"]
+[dependencies]
+async-trait = "0.1.88"
+hmac = "0.13.0-pre.5"
+sha2 = "0.11.0-pre.5"
+chrono = "0.4.41"
+reqwest = "0.12.15"
+hex = "0.4.3"
+serde_json = "1.0.140"
+dns-sdk-macros = { path = "./dns-sdk-macros" }
+serde = { version = "1.0", features = ["derive"] }
+
+[lib]

@@ -1,0 +1,12 @@
+[package]
+name = "dns-sdk-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Macros for the DNS SDK library"
+license = "GPL-3"
+authors = ["fantasy135 <zhao.h2018@gmail.com>"]
+repository = "https://github.com/fantasy135/rust-dns-sdk"
+
+[dependencies]
+
+[lib]
