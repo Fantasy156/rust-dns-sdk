@@ -18,7 +18,7 @@ use sha2::{Sha256, Digest};
 use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, HOST};
 use hex::encode as hex_encode;
-use crate::client::{DnsClient, DnsProviderBuilder, RecordOperationBuilder};
+use crate::client::{DnsClient, DnsProviderBuilder, DnsProviderImpl, RecordOperationBuilder};
 use async_trait::async_trait;
 use serde_json::{to_string, Value};
 use dns_sdk_macros::extract_params;
@@ -34,7 +34,7 @@ pub struct TencentDnsBuilder {
 }
 
 impl DnsProviderBuilder for TencentDnsBuilder {
-    type Output = TencentDns;
+    type Output = DnsProviderImpl;
 
     /// Sets configuration parameters for the DNS provider builder.
     ///
@@ -44,21 +44,22 @@ impl DnsProviderBuilder for TencentDnsBuilder {
     ///
     /// # Panics
     /// Panics if an unknown parameter key is provided.
-    fn set_param(mut self, key: &str, value: &str) -> Self {
+    fn set_param(self: Box<Self>, key: &str, value: &str) -> Box<dyn DnsProviderBuilder<Output = DnsProviderImpl>> {
+        let mut this = *self;
         match key {
-            "secret_id" => self.secret_id = Some(value.to_string()),
-            "secret_key" => self.secret_key = Some(value.to_string()),
-            _ => panic!("Unknown parameter: {}", key),
+            "secret_id" => this.secret_id = Some(value.into()),
+            "secret_key" => this.secret_key = Some(value.into()),
+            _ => panic!("Invalid parameter: {}", key),
         }
-        self
+        Box::new(this)
     }
 
     /// Constructs a new TencentDns client instance using configured parameters.
-    fn build(self) -> Self::Output {
-        TencentDns {
+    fn build(self: Box<Self>) -> DnsProviderImpl {
+        DnsProviderImpl::Tencent(TencentDns {
             secret_id: self.secret_id.unwrap(),
             secret_key: self.secret_key.unwrap(),
-        }
+        })
     }
 }
 
