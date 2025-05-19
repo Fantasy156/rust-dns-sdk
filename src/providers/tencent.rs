@@ -22,19 +22,23 @@ use crate::client::{DnsClient, DnsProviderBuilder, DnsProviderImpl, RecordOperat
 use async_trait::async_trait;
 use serde_json::{to_string, Value};
 use dns_sdk_macros::extract_params;
-use crate::providers::utils::clint;
+use reqwest::Method;
+use serde::{Deserialize, Serialize};
+use crate::utils::request::DnsHttpClient;
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Builder for creating Tencent Cloud DNS client instances.
 #[derive(Default)]
-pub struct TencentDnsBuilder {
+pub struct TencentDnsBuilder<T: DnsHttpClient + Default> {
     secret_id: Option<String>,
     secret_key: Option<String>,
+    api:  String,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl DnsProviderBuilder for TencentDnsBuilder {
-    type Output = DnsProviderImpl;
+impl<T: DnsHttpClient + Default + 'static> DnsProviderBuilder for TencentDnsBuilder<T> {
+    type Output = DnsProviderImpl<T>;
 
     /// Sets configuration parameters for the DNS provider builder.
     ///
@@ -42,9 +46,8 @@ impl DnsProviderBuilder for TencentDnsBuilder {
     /// - "secret_id"
     /// - "secret_key"
     ///
-    /// # Panics
-    /// Panics if an unknown parameter key is provided.
-    fn set_param(self: Box<Self>, key: &str, value: &str) -> Box<dyn DnsProviderBuilder<Output = DnsProviderImpl>> {
+    /// # Panics    ///  if an unknown parameter key is provided.
+    fn set_param(self: Box<Self>, key: &str, value: &str) -> Box<dyn DnsProviderBuilder<Output = DnsProviderImpl<T>>> {
         let mut this = *self;
         match key {
             "secret_id" => this.secret_id = Some(value.into()),
@@ -55,8 +58,10 @@ impl DnsProviderBuilder for TencentDnsBuilder {
     }
 
     /// Constructs a new TencentDns client instance using configured parameters.
-    fn build(self: Box<Self>) -> DnsProviderImpl {
+    fn build(self: Box<Self>) -> DnsProviderImpl<T> {
         DnsProviderImpl::Tencent(TencentDns {
+            http_client: T::default(),
+            api: "https://dnspod.tencentcloudapi.com".to_string(),
             secret_id: self.secret_id.unwrap(),
             secret_key: self.secret_key.unwrap(),
         })
@@ -195,22 +200,58 @@ impl Authorization {
 }
 
 /// Implementation of DNS client for Tencent Cloud.
-pub struct TencentDns {
+pub struct TencentDns<T: DnsHttpClient> {
+    /// HTTP client for making requests
+    http_client: T,
+    /// API endpoint
+    api: String,
     /// API Secret ID
     secret_id: String,
     /// API Secret Key
     secret_key: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct DescribeRecordListResponse {
+    Response: RecordResponse,
+}
+#[derive(Debug, Deserialize, Serialize)]
+struct RecordResponse {
+    RecordCountInfo: RecordCountInfo,
+    RecordList: Vec<Record>,
+    RequestId: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RecordCountInfo {
+    ListCount: u32,
+    SubdomainCount: u32,
+    TotalCount: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Record {
+    Name: String,
+    #[serde(flatten)]
+    other: serde_json::Value,
+}
+
 #[async_trait]
-impl DnsClient for TencentDns {
+impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
     /// Retrieves user details from Tencent Cloud API.
     async fn describe_user_detail(&self) -> Result<String, Box<dyn Error>> {
         let headers = Authorization::new()
             .action("DescribeUserDetail")
             .build_request_headers(&*self.secret_id, &*self.secret_key)?;
 
-        Ok(clint(headers, String::new()).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            self.api.clone(),
+            headers,
+            None,
+        ).await?;
+
+        Ok(resp.to_string())
     }
 
     /// Retrieves list of domain names associated with the user.
@@ -219,7 +260,14 @@ impl DnsClient for TencentDns {
             .action("DescribeDomainList")
             .build_request_headers(&*self.secret_id, &*self.secret_key)?;
 
-        Ok(clint(headers, String::new()).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            self.api.clone(),
+            headers,
+            None,
+        ).await;
+
+        Ok(resp?.to_string())
     }
 
     /// Retrieves record lines for a specific domain.
@@ -243,7 +291,14 @@ impl DnsClient for TencentDns {
             .payload(json_body.clone())
             .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        Ok(clint(headers, json_body).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            self.api.clone(),
+            headers,
+            Some(json_body),
+        ).await;
+
+        Ok(resp?.to_string())
     }
 
     /// Retrieves record list for a specific domain.
@@ -259,14 +314,48 @@ impl DnsClient for TencentDns {
             .payload(json_body.clone())
             .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        Ok(clint(headers, json_body).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            self.api.clone(),
+            headers,
+            Some(json_body),
+        ).await;
+
+        Ok(resp?.to_string())
+    }
+
+    /// Filters DNS records to only include those matching a specific subdomain.
+    async fn describe_subdomain_record_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
+        let params = extract_params!(builder, RequestParams, {
+        required domain: String => "Domain",
+        required subdomain: String => "SubDomain"
+    });
+
+        let raw_json = self.describe_record_list(builder).await?;
+
+        // 反序列化为结构体
+        let mut parsed: DescribeRecordListResponse = serde_json::from_str(&raw_json)?;
+
+        // 过滤匹配子域名的记录
+        parsed.Response.RecordList.retain(|record| record.Name == params.subdomain);
+
+        // 更新计数信息
+        let count = parsed.Response.RecordList.len() as u32;
+        parsed.Response.RecordCountInfo = RecordCountInfo {
+            ListCount: count,
+            SubdomainCount: count,
+            TotalCount: count,
+        };
+
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Retrieves details of a specific DNS record.
     async fn describe_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
-            required record_id: u64 => "RecordId"
+            required subdomain: String => "SubDomain"
         });
 
         let json_body = to_string(&params)?;
@@ -275,7 +364,14 @@ impl DnsClient for TencentDns {
             .payload(json_body.clone())
             .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        Ok(clint(headers, json_body).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            "https://dnspod.tencentcloudapi.com".to_string(),
+            headers,
+            Some(json_body),
+        ).await;
+
+        Ok(resp?.to_string())
     }
 
     /// Creates a new DNS record.
@@ -295,7 +391,14 @@ impl DnsClient for TencentDns {
             .payload(json_body.clone())
             .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        Ok(clint(headers, json_body).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            self.api.clone(),
+            headers,
+            Some(json_body),
+        ).await;
+
+        Ok(resp?.to_string())
     }
 
     /// Modifies an existing DNS record.
@@ -304,7 +407,7 @@ impl DnsClient for TencentDns {
             required domain: String => "Domain",
             required record_type: String => "RecordType",
             required value: String => "Value",
-            required record_id: u64 => "RecordId",
+            required record_id: String => "RecordId",
             optional record_line: String = "默认".to_string() => "RecordLine",
             optional ttl: u32 = 600 => "TTL"
         });
@@ -315,22 +418,85 @@ impl DnsClient for TencentDns {
             .payload(json_body.clone())
             .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        Ok(clint(headers, json_body).await?)
+        let resp = self.http_client.request(
+            Method::POST,
+            self.api.clone(),
+            headers,
+            Some(json_body),
+        ).await;
+
+        Ok(resp?.to_string())
     }
 
-    /// Deletes a DNS record.
+    /// Deletes one or more DNS records based on domain, subdomain, and optionally record ID.
     async fn delete_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
-            required domain: String => "Domain",
-            required record_id: u64 => "RecordId"
-        });
+        required domain: String => "Domain",
+        required subdomain: String => "SubDomain",
+        optional record_id: String = "".to_string() => "RecordId"
+    });
 
-        let json_body = to_string(&params)?;
-        let headers = Authorization::new()
-            .action("DeleteRecord")
-            .payload(json_body.clone())
-            .build_request_headers(&self.secret_id, &self.secret_key)?;
+        // 情况 1：指定了 RecordId，直接删除
+        if !params.record_id.is_empty() {
+            let json_body = serde_json::to_string(&params)?;
+            let headers = Authorization::new()
+                .action("DeleteRecord")
+                .payload(json_body.clone())
+                .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        Ok(clint(headers, json_body).await?)
+            let resp = self.http_client.request(
+                Method::POST,
+                self.api.clone(),
+                headers,
+                Some(json_body),
+            ).await?;
+
+            return Ok(resp.to_string());
+        }
+
+        // 情况 2：未指定 RecordId，删除所有匹配 SubDomain 的记录
+        let subdomain_resp = self.describe_subdomain_record_list(builder).await?;
+        let subdomain_json: serde_json::Value = serde_json::from_str(&subdomain_resp)?;
+
+        let record_list = subdomain_json
+            .get("Response")
+            .and_then(|r| r.get("RecordList"))
+            .and_then(|r| r.as_array())
+            .ok_or("未找到 RecordList 或格式错误")?;
+
+        let mut deleted = Vec::new();
+
+        for record in record_list {
+            if let Some(record_id) = record.get("RecordId").and_then(|v| v.as_u64()) {
+                let delete_body = serde_json::json!({
+                "Domain": params.domain,
+                "RecordId": record_id
+            });
+
+                let json_str = delete_body.to_string();
+                let headers = Authorization::new()
+                    .action("DeleteRecord")
+                    .payload(json_str.clone())
+                    .build_request_headers(&self.secret_id, &self.secret_key)?;
+
+                let resp = self.http_client.request(
+                    Method::POST,
+                    self.api.clone(),
+                    headers,
+                    Some(json_str),
+                ).await?;
+
+                // 可以判断 resp 是否成功后再加进去
+                deleted.push(record_id);
+            }
+        }
+
+        Ok(serde_json::json!({
+        "Response": {
+            "DeletedList": deleted,
+            "Subdomain": params.subdomain,
+            "Domain": params.domain
+            }
+        }).to_string())
     }
 }

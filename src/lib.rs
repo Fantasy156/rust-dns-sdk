@@ -31,3 +31,4 @@
 
 pub(crate) mod providers;
 pub mod client;
+pub(crate) mod utils;

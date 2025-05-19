@@ -28,6 +28,7 @@ macro_rules! extract_params {
     (@type &str) => { String };
     (@type u32) => { u32 };
     (@type u64) => { u64 };
+    (@type bool) => { bool };
 
     // Extract required fields with type conversion and validation
     (@extract_required $builder:expr, $field:ident, String) => {
@@ -41,6 +42,9 @@ macro_rules! extract_params {
     };
     (@extract_required $builder:expr, $field:ident, u64) => {
         $builder.$field.ok_or_else(|| format!("{} is required", stringify!($field)))?
+    };
+    (@extract_required $builder:expr, $field:ident, bool) => {
+    $builder.$field.ok_or_else(|| format!("{} is required", stringify!($field)))?
     };
 
     // Extract optional fields with default values
@@ -56,7 +60,10 @@ macro_rules! extract_params {
     (@extract_optional $builder:expr, $field:ident, u64, $default:expr) => {
         $builder.$field.unwrap_or($default)
     };
-    
+    (@extract_optional $builder:expr, $field:ident, bool, $default:expr) => {
+    $builder.$field.unwrap_or($default)
+    };
+
     ($builder:expr, $struct_name:ident, {
         $( required $req_field:ident : $req_ty:tt => $req_key:literal ),* $(,)?
         $( optional $opt_field:ident : $opt_ty:tt = $opt_default:expr => $opt_key:literal ),* $(,)?

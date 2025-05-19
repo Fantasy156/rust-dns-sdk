@@ -14,6 +14,8 @@
 
 // Import Tencent Cloud DNS implementation
 pub(crate) use crate::providers::tencent::{TencentDns, TencentDnsBuilder};
+pub(crate) use crate::providers::cloudflare::{CloudFlareDns, CloudFlareDnsBuilder};
+use crate::utils::request::{DefaultDnsClient, DnsHttpClient};
 use std::error::Error;
 use async_trait::async_trait;
 
@@ -23,18 +25,21 @@ use async_trait::async_trait;
 pub enum DnsProvider {
     /// Tencent Cloud DNS Service
     Tencent,
+    /// CloudFlare Cloud DNS Service
+    CloudFlare
     // Additional providers can be added here
 }
 
 /// DNS Client Implementation Wrapper
 /// 
 /// Used to encapsulate different provider's DNS client implementations.
-pub enum DnsProviderImpl {
+pub enum DnsProviderImpl<T: DnsHttpClient> {
     /// Tencent Cloud Implementation
-    Tencent(TencentDns),
+    Tencent(TencentDns<T>),
+    CloudFlare(CloudFlareDns<T>)
 }
 
-impl DnsProviderImpl {
+impl DnsProviderImpl<DefaultDnsClient> {
     /// Create a builder for the specified provider
     /// 
     /// Returns a builder instance corresponding to the provider type.
@@ -44,9 +49,10 @@ impl DnsProviderImpl {
     /// 
     /// # Returns
     /// Returns a builder that implements the `DnsProviderBuilder` trait.
-    pub fn new(vendor: DnsProvider) -> Box<dyn DnsProviderBuilder<Output = DnsProviderImpl>> {
-        match vendor {
+    pub fn new(provider: DnsProvider) -> Box<dyn DnsProviderBuilder<Output = Self>> {
+        match provider {
             DnsProvider::Tencent => Box::new(TencentDnsBuilder::default()),
+            DnsProvider::CloudFlare => Box::new(CloudFlareDnsBuilder::default()),
         }
     }
 }
@@ -117,6 +123,15 @@ pub trait DnsClient: Send + Sync {
     /// Returns a string containing the record list or an error.
     async fn describe_record_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>>;
 
+    /// Get subdomain list
+    ///
+    /// # Parameters
+    /// - `builder`: SubDomain operation builder
+    ///
+    /// # Returns
+    /// Returns a string containing the record list or an error.
+    async fn describe_subdomain_record_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>>;
+
     /// Get record details
     /// 
     /// # Parameters
@@ -156,10 +171,11 @@ pub trait DnsClient: Send + Sync {
 
 // Implement DnsClient trait
 #[async_trait]
-impl DnsClient for DnsProviderImpl {
+impl<T: DnsHttpClient> DnsClient for DnsProviderImpl<T> {
     async fn describe_user_detail(&self) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.describe_user_detail().await,
+            DnsProviderImpl::CloudFlare(c) => c.describe_user_detail().await,
             // Other providers...
         }
     }
@@ -167,6 +183,7 @@ impl DnsClient for DnsProviderImpl {
     async fn describe_domain_name_list(&self) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.describe_domain_name_list().await,
+            DnsProviderImpl::CloudFlare(c) => c.describe_domain_name_list().await,
             // Other providers...
         }
     }
@@ -174,6 +191,7 @@ impl DnsClient for DnsProviderImpl {
     async fn describe_record_line_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.describe_record_line_list(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.describe_record_line_list(builder).await,
             // Other providers...
         }
     }
@@ -181,6 +199,15 @@ impl DnsClient for DnsProviderImpl {
     async fn describe_record_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.describe_record_list(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.describe_record_list(builder).await,
+            // Other providers...
+        }
+    }
+
+    async fn describe_subdomain_record_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
+        match self {
+            DnsProviderImpl::Tencent(t) => t.describe_subdomain_record_list(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.describe_subdomain_record_list(builder).await,
             // Other providers...
         }
     }
@@ -188,6 +215,7 @@ impl DnsClient for DnsProviderImpl {
     async fn describe_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.describe_record(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.describe_record(builder).await,
             // Other providers...
         }
     }
@@ -195,6 +223,7 @@ impl DnsClient for DnsProviderImpl {
     async fn create_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.create_record(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.create_record(builder).await,
             // Other providers...
         }
     }
@@ -202,6 +231,7 @@ impl DnsClient for DnsProviderImpl {
     async fn modify_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.modify_record(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.modify_record(builder).await,
             // Other providers...
         }
     }
@@ -209,6 +239,7 @@ impl DnsClient for DnsProviderImpl {
     async fn delete_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         match self {
             DnsProviderImpl::Tencent(t) => t.delete_record(builder).await,
+            DnsProviderImpl::CloudFlare(c) => c.delete_record(builder).await,
             // Other providers...
         }
     }
@@ -225,9 +256,10 @@ pub struct RecordOperationBuilder {
     pub(crate) record_line: Option<String>,
     pub(crate) ttl: Option<u32>,
     pub(crate) value: Option<String>,
-    pub(crate) record_id: Option<u64>,
+    pub(crate) record_id: Option<String>,
     pub(crate) weight:  Option<u32>,
     pub(crate) domain_grade: Option<String>,
+    pub(crate) proxied : Option<bool>,
 }
 
 impl RecordOperationBuilder {
@@ -263,107 +295,27 @@ impl RecordOperationBuilder {
         self
     }
 
-    /// Set IPv4 address
-    /// 
+    /// Set record type
+    ///
     /// # Parameters
-    /// - `ip`: IPv4 address
-    /// 
+    /// - `record_type`: Record type
+    ///
     /// # Returns
     /// Returns itself to support chaining.
-    pub fn ipv4(mut self, ip: &str) -> Self {
-        self.record_type = Some("A".to_string());
-        self.value = Some(ip.to_string());
+    pub fn record_type(mut self, record_type: &str) -> Self {
+        self.record_type = Some(record_type.to_string());
         self
     }
 
-    /// Set IPv6 address
+    /// Set Value address
     /// 
     /// # Parameters
-    /// - `ip`: IPv6 address
+    /// - `Value`: Value address
     /// 
     /// # Returns
     /// Returns itself to support chaining.
-    pub fn ipv6(mut self, ip: &str) -> Self {
-        self.record_type = Some("AAAA".to_string());
-        self.value = Some(ip.to_string());
-        self
-    }
-
-    /// Set CNAME record
-    /// 
-    /// # Parameters
-    /// - `target`: Target address
-    /// 
-    /// # Returns
-    /// Returns itself to support chaining.
-    pub fn cname(mut self, target: &str) -> Self {
-        self.record_type = Some("CNAME".to_string());
-        self.value = Some(target.to_string());
-        self
-    }
-
-    /// Set TXT record
-    /// 
-    /// # Parameters
-    /// - `target`: Target address
-    /// 
-    /// # Returns
-    /// Returns itself to support chaining.
-    pub fn txt(mut self, target: &str) -> Self {
-        self.record_type = Some("TXT".to_string());
-        self.value = Some(target.to_string());
-        self
-    }
-
-    /// Set MX record
-    /// 
-    /// # Parameters
-    /// - `target`: Target address
-    /// 
-    /// # Returns
-    /// Returns itself to support chaining.
-    pub fn mx(mut self, target: &str) -> Self {
-        self.record_type = Some("MX".to_string());
-        self.value = Some(target.to_string());
-        self
-    }
-
-    /// Set NS record
-    /// 
-    /// # Parameters
-    /// - `target`: Target address
-    /// 
-    /// # Returns
-    /// Returns itself to support chaining.
-    pub fn ns(mut self, target: &str) -> Self {
-        self.record_type = Some("NS".to_string());
-        self.value = Some(target.to_string());
-        self
-    }
-
-    /// Set CAA record
-    /// 
-    /// # Parameters
-    /// - `target`: Target address
-    /// 
-    /// # Returns
-    /// Returns itself to support chaining.
-    pub fn caa(mut self, target: &str) -> Self {
-        self.record_type = Some("CAA".to_string());
-        self.value = Some(target.to_string());
-        self
-    }
-
-    /// Set SRV record
-    /// 
-    /// # Parameters
-    /// - `target`: Target address
-    /// 
-    /// # Returns
-    /// Returns itself to support chaining.
-    pub fn srv(mut self, target: &str) -> Self {
-        self.record_type = Some("SRV".to_string());
-        self.value = Some(target.to_string());
+    pub fn value(mut self, value: &str) -> Self {
+        self.value = Some(value.to_string());
         self
     }
 
@@ -410,8 +362,13 @@ impl RecordOperationBuilder {
     /// 
     /// # Returns
     /// Returns itself to support chaining.
-    pub fn record_id(mut self, id: u64) -> Self {
+    pub fn record_id(mut self, id: String) -> Self {
         self.record_id = Some(id);
+        self
+    }
+
+    pub fn proxied(mut self, proxied: bool) -> Self {
+        self.proxied = Some(proxied);
         self
     }
 }
