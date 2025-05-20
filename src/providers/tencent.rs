@@ -290,31 +290,6 @@ struct TencentError {
     extra: HashMap<String, Value>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct DescribeRecordListResponse {
-    Response: RecordResponse,
-}
-#[derive(Deserialize, Serialize)]
-struct RecordResponse {
-    RecordCountInfo: RecordCountInfo,
-    RecordList: Vec<Record>,
-    RequestId: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct RecordCountInfo {
-    ListCount: u32,
-    SubdomainCount: u32,
-    TotalCount: u32,
-}
-
-#[derive(Deserialize, Serialize)]
-struct Record {
-    Name: String,
-    #[serde(flatten)]
-    other: serde_json::Value,
-}
-
 #[async_trait]
 impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
     /// Retrieves user details from Tencent Cloud API.
@@ -420,19 +395,21 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
 
         let raw_json = self.describe_record_list(builder).await?;
 
-        // 反序列化为结构体
-        let mut parsed: DescribeRecordListResponse = serde_json::from_str(&raw_json)?;
+        let mut parsed: TencentResponse = serde_json::from_str(&raw_json)?;
 
-        // 过滤匹配子域名的记录
-        parsed.Response.RecordList.retain(|record| record.Name == params.subdomain);
+        parsed.response.record_list.retain(|record| {
+            record.name
+                .as_ref()
+                .and_then(|v| v.as_str())
+                == Some(params.subdomain.as_str())
+        });
 
-        // 更新计数信息
-        let count = parsed.Response.RecordList.len() as u32;
-        parsed.Response.RecordCountInfo = RecordCountInfo {
-            ListCount: count,
-            SubdomainCount: count,
-            TotalCount: count,
-        };
+        let count = parsed.response.record_list.len() as u32;
+        parsed.response.record_count_info = Some(json!({
+            "ListCount": count,
+            "SubdomainCount": count,
+            "TotalCount": count
+        }));
 
 
         Ok(to_string(&parsed)?)
@@ -451,7 +428,7 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
         let mut record_count_info: Option<Value> = None;
 
         let record_ids = if params.record_id != 0 {
-            record_count_info = Some(serde_json::json!({
+            record_count_info = Some(json!({
             "ListCount": 1,
             "SubdomainCount": 1,
             "TotalCount": 1
