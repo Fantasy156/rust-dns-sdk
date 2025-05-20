@@ -12,6 +12,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::HashMap;
 use std::error::Error;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Digest};
@@ -20,11 +21,12 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, HOST};
 use hex::encode as hex_encode;
 use crate::client::{DnsClient, DnsProviderBuilder, DnsProviderImpl, RecordOperationBuilder};
 use async_trait::async_trait;
-use serde_json::{to_string, Value};
+use serde_json::{json, to_string, Value};
 use dns_sdk_macros::extract_params;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use crate::utils::request::DnsHttpClient;
+use crate::utils::serde_utils::{is_empty_or_none, is_null_or_none, vec_is_empty, option_is_empty};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -211,25 +213,102 @@ pub struct TencentDns<T: DnsHttpClient> {
     secret_key: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
+struct TencentResponse {
+    #[serde(rename = "Response")]
+    response :  Response,
+}
+
+#[derive(Deserialize, Serialize)]
+#[derive(Default)]
+struct Response {
+    #[serde(rename = "RequestId", default)]
+    request_id: String,
+    #[serde(rename = "UserInfo", default, skip_serializing_if = "is_null_or_none")]
+    user_info: Option<Value>,
+    #[serde(rename = "DomainCountInfo", default, skip_serializing_if = "is_null_or_none")]
+    domain_count_info: Option<Value>,
+    #[serde(rename = "DomainList", default, skip_serializing_if = "is_empty_or_none")]
+    domain_list: Option<Vec<Value>>,
+    #[serde(rename = "LineGroupList", default, skip_serializing_if = "is_empty_or_none")]
+    line_group_list: Option<Vec<Value>>,
+    #[serde(rename = "LineList", default, skip_serializing_if = "is_empty_or_none")]
+    line_list: Option<Vec<Value>>,
+    #[serde(rename = "RecordCountInfo", default, skip_serializing_if = "is_null_or_none")]
+    record_count_info: Option<Value>,
+    #[serde(rename = "RecordList", default, skip_serializing_if = "vec_is_empty")]
+    record_list: Vec<RecordList>,
+    #[serde(rename = "RecordInfo", default,  skip_serializing_if = "option_is_empty")]
+    record_info: Option<RecordInfo>,
+    #[serde(rename = "Error", default, skip_serializing_if = "option_is_empty")]
+    record_log_list: Option<TencentError>,
+    #[serde(rename = "RecordInfoList", default, skip_serializing_if = "vec_is_empty")]
+    record_info_list: Vec<RecordInfo>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RecordInfo {
+    #[serde(rename = "TTL", default)]
+    ttl: Option<Value>,
+    #[serde(rename = "Id", default)]
+    id: Option<Value>,
+    #[serde(rename = "SubDomain", default)]
+    sub_domain: Option<Value>,
+    #[serde(rename = "RecordType", default)]
+    record_type: Option<Value>,
+    #[serde(rename = "Value", default)]
+    value: Option<Value>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RecordList {
+    #[serde(rename = "Name", default)]
+    name: Option<Value>,
+    #[serde(rename = "Type", default)]
+    _type: Option<Value>,
+    #[serde(rename = "Value", default)]
+    value: Option<Value>,
+    #[serde(rename = "TTL", default)]
+    ttl: Option<Value>,
+    #[serde(rename = "RecordId")]
+    record_id: u64,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TencentError {
+    #[serde(rename = "Code", default)]
+    code: Option<Value>,
+    #[serde(rename = "Message", default)]
+    message: Option<Value>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
 struct DescribeRecordListResponse {
     Response: RecordResponse,
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct RecordResponse {
     RecordCountInfo: RecordCountInfo,
     RecordList: Vec<Record>,
     RequestId: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct RecordCountInfo {
     ListCount: u32,
     SubdomainCount: u32,
     TotalCount: u32,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Record {
     Name: String,
     #[serde(flatten)]
@@ -251,7 +330,9 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             None,
         ).await?;
 
-        Ok(resp.to_string())
+        let parsed: TencentResponse = serde_json::from_str(&resp.to_string())?;
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Retrieves list of domain names associated with the user.
@@ -265,9 +346,11 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             self.api.clone(),
             headers,
             None,
-        ).await;
+        ).await?;
 
-        Ok(resp?.to_string())
+        let parsed: TencentResponse = serde_json::from_value(resp)?;
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Retrieves record lines for a specific domain.
@@ -296,9 +379,11 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             self.api.clone(),
             headers,
             Some(json_body),
-        ).await;
+        ).await?;
 
-        Ok(resp?.to_string())
+        let parsed: TencentResponse = serde_json::from_value(resp)?;
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Retrieves record list for a specific domain.
@@ -319,9 +404,11 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             self.api.clone(),
             headers,
             Some(json_body),
-        ).await;
+        ).await?;
 
-        Ok(resp?.to_string())
+        let parsed: TencentResponse = serde_json::from_value(resp)?;
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Filters DNS records to only include those matching a specific subdomain.
@@ -356,22 +443,63 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
             required subdomain: String => "SubDomain"
+            optional record_id: (String as u64) = 0 => "RecordId"
         });
 
-        let json_body = to_string(&params)?;
-        let headers = Authorization::new()
-            .action("DescribeRecord")
-            .payload(json_body.clone())
-            .build_request_headers(&self.secret_id, &self.secret_key)?;
+        let mut record_info_list = Vec::new();
+        let mut request_id = String::new();
+        let mut record_count_info: Option<Value> = None;
 
-        let resp = self.http_client.request(
-            Method::POST,
-            "https://dnspod.tencentcloudapi.com".to_string(),
-            headers,
-            Some(json_body),
-        ).await;
+        let record_ids = if params.record_id != 0 {
+            record_count_info = Some(serde_json::json!({
+            "ListCount": 1,
+            "SubdomainCount": 1,
+            "TotalCount": 1
+        }));
+            vec![params.record_id]
+        } else {
+            let subdomain_resp = self.describe_subdomain_record_list(builder).await?;
+            let parsed: TencentResponse = serde_json::from_str(&subdomain_resp)?;
+            record_count_info = Option::from(parsed.response.record_count_info);
+            parsed.response.record_list.into_iter().map(|r| r.record_id).collect()
+        };
 
-        Ok(resp?.to_string())
+
+        for id in &record_ids {
+            let params = extract_params!(builder, RequestParams, {required domain: String => "Domain",
+                optional record_id: (String as u64) = *id => "RecordId"
+            });
+
+            let json_body = to_string(&params)?;
+            let headers = Authorization::new()
+                .action("DescribeRecord")
+                .payload(json_body.clone())
+                .build_request_headers(&self.secret_id, &self.secret_key)?;
+
+            let resp = self.http_client.request(
+                    Method::POST, "https://dnspod.tencentcloudapi.com".to_string(),
+                    headers,
+                    Some(json_body),
+            ).await?;
+
+            let parsed: TencentResponse = serde_json::from_value(resp)?;
+            request_id = parsed.response.request_id;
+
+            if let Some(record_info) = parsed.response.record_info {
+                record_info_list.push(record_info);
+            }
+        }
+
+        let merged_response = TencentResponse {
+            response: Response {
+                request_id,
+                record_count_info,
+                record_info_list,
+                ..Default::default()
+            }
+        };
+
+        Ok(to_string(&merged_response)?)
     }
 
     /// Creates a new DNS record.
@@ -396,9 +524,11 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             self.api.clone(),
             headers,
             Some(json_body),
-        ).await;
+        ).await?;
 
-        Ok(resp?.to_string())
+        let parsed: TencentResponse = serde_json::from_value(resp)?;
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Modifies an existing DNS record.
@@ -407,7 +537,7 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             required domain: String => "Domain",
             required record_type: String => "RecordType",
             required value: String => "Value",
-            required record_id: String => "RecordId",
+            required record_id: (String as u64) => "RecordId",
             optional record_line: String = "默认".to_string() => "RecordLine",
             optional ttl: u32 = 600 => "TTL"
         });
@@ -423,79 +553,57 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
             self.api.clone(),
             headers,
             Some(json_body),
-        ).await;
+        ).await?;
 
-        Ok(resp?.to_string())
+        let parsed: TencentResponse = serde_json::from_value(resp)?;
+
+        Ok(to_string(&parsed)?)
     }
 
     /// Deletes one or more DNS records based on domain, subdomain, and optionally record ID.
     async fn delete_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
-        required domain: String => "Domain",
-        required subdomain: String => "SubDomain",
-        optional record_id: String = "".to_string() => "RecordId"
-    });
+            required domain: String => "Domain",
+            required subdomain: String => "SubDomain",
+            optional record_id: (String as u64) = 0 => "RecordId"
+        });
 
-        // 情况 1：指定了 RecordId，直接删除
-        if !params.record_id.is_empty() {
-            let json_body = serde_json::to_string(&params)?;
+        let record_ids = if params.record_id != 0 {
+            vec![params.record_id]
+        } else {
+            let subdomain_resp = self.describe_subdomain_record_list(builder).await?;
+            let parsed: TencentResponse = serde_json::from_str(&subdomain_resp)?;
+            parsed.response.record_list.into_iter().map(|r| r.record_id).collect()
+        };
+
+        let mut deleted = Vec::new();
+
+        for id in &record_ids {
+            let json_body = to_string(&json!({
+            "Domain": params.domain,
+            "RecordId": id
+        }))?;
+
             let headers = Authorization::new()
                 .action("DeleteRecord")
                 .payload(json_body.clone())
                 .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-            let resp = self.http_client.request(
+            self.http_client.request(
                 Method::POST,
                 self.api.clone(),
                 headers,
                 Some(json_body),
             ).await?;
 
-            return Ok(resp.to_string());
+            deleted.push(*id);
         }
 
-        // 情况 2：未指定 RecordId，删除所有匹配 SubDomain 的记录
-        let subdomain_resp = self.describe_subdomain_record_list(builder).await?;
-        let subdomain_json: serde_json::Value = serde_json::from_str(&subdomain_resp)?;
-
-        let record_list = subdomain_json
-            .get("Response")
-            .and_then(|r| r.get("RecordList"))
-            .and_then(|r| r.as_array())
-            .ok_or("未找到 RecordList 或格式错误")?;
-
-        let mut deleted = Vec::new();
-
-        for record in record_list {
-            if let Some(record_id) = record.get("RecordId").and_then(|v| v.as_u64()) {
-                let delete_body = serde_json::json!({
-                "Domain": params.domain,
-                "RecordId": record_id
-            });
-
-                let json_str = delete_body.to_string();
-                let headers = Authorization::new()
-                    .action("DeleteRecord")
-                    .payload(json_str.clone())
-                    .build_request_headers(&self.secret_id, &self.secret_key)?;
-
-                let resp = self.http_client.request(
-                    Method::POST,
-                    self.api.clone(),
-                    headers,
-                    Some(json_str),
-                ).await?;
-
-                // 可以判断 resp 是否成功后再加进去
-                deleted.push(record_id);
-            }
-        }
-
-        Ok(serde_json::json!({
-        "Response": {
-            "DeletedList": deleted,
-            "Subdomain": params.subdomain,
-            "Domain": params.domain
+        Ok(json!({
+            "Response": {
+                "DeletedList": deleted,
+                "Subdomain": params.subdomain,
+                "Domain": params.domain
             }
         }).to_string())
     }
