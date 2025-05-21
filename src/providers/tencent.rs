@@ -35,7 +35,6 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct TencentDnsBuilder<T: DnsHttpClient + Default> {
     secret_id: Option<String>,
     secret_key: Option<String>,
-    api:  String,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -419,64 +418,24 @@ impl<T: DnsHttpClient> DnsClient for TencentDns<T> {
     async fn describe_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
-            required subdomain: String => "SubDomain"
-            optional record_id: (String as u64) = 0 => "RecordId"
+            required record_id: (String as u64) => "RecordId"
         });
 
-        let mut record_info_list = Vec::new();
-        let mut request_id = String::new();
-        let mut record_count_info: Option<Value> = None;
+        let json_body = to_string(&params)?;
+        let headers = Authorization::new()
+            .action("DescribeRecord")
+            .payload(json_body.clone())
+            .build_request_headers(&self.secret_id, &self.secret_key)?;
 
-        let record_ids = if params.record_id != 0 {
-            record_count_info = Some(json!({
-            "ListCount": 1,
-            "SubdomainCount": 1,
-            "TotalCount": 1
-        }));
-            vec![params.record_id]
-        } else {
-            let subdomain_resp = self.describe_subdomain_record_list(builder).await?;
-            let parsed: TencentResponse = serde_json::from_str(&subdomain_resp)?;
-            record_count_info = Option::from(parsed.response.record_count_info);
-            parsed.response.record_list.into_iter().map(|r| r.record_id).collect()
-        };
+        let resp = self.http_client.request(
+            Method::POST, "https://dnspod.tencentcloudapi.com".to_string(),
+            headers,
+            Some(json_body),
+        ).await?;
 
+        let parsed: TencentResponse = serde_json::from_value(resp)?;
 
-        for id in &record_ids {
-            let params = extract_params!(builder, RequestParams, {required domain: String => "Domain",
-                optional record_id: (String as u64) = *id => "RecordId"
-            });
-
-            let json_body = to_string(&params)?;
-            let headers = Authorization::new()
-                .action("DescribeRecord")
-                .payload(json_body.clone())
-                .build_request_headers(&self.secret_id, &self.secret_key)?;
-
-            let resp = self.http_client.request(
-                    Method::POST, "https://dnspod.tencentcloudapi.com".to_string(),
-                    headers,
-                    Some(json_body),
-            ).await?;
-
-            let parsed: TencentResponse = serde_json::from_value(resp)?;
-            request_id = parsed.response.request_id;
-
-            if let Some(record_info) = parsed.response.record_info {
-                record_info_list.push(record_info);
-            }
-        }
-
-        let merged_response = TencentResponse {
-            response: Response {
-                request_id,
-                record_count_info,
-                record_info_list,
-                ..Default::default()
-            }
-        };
-
-        Ok(to_string(&merged_response)?)
+        Ok(to_string(&parsed)?)
     }
 
     /// Creates a new DNS record.
