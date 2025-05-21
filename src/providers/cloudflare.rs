@@ -12,19 +12,22 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::HashMap;
 use std::error::Error;
 use async_trait::async_trait;
+use chrono::DateTime;
 use dns_sdk_macros::extract_params;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Method;
-use serde_json::to_string;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{to_string, Value};
 use crate::client::{DnsClient, DnsProviderBuilder, DnsProviderImpl, RecordOperationBuilder};
 use crate::utils::request::{DefaultDnsClient, DnsHttpClient};
+use crate::utils::serde_utils::{is_empty_or_none, is_null_or_none, vec_is_empty, option_is_empty};
 
 #[derive(Default)]
 pub struct CloudFlareDnsBuilder<T: DnsHttpClient + Default> {
     api_token: Option<String>,
-    api:  String,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -36,8 +39,7 @@ impl<T: DnsHttpClient + Default + 'static> DnsProviderBuilder for CloudFlareDnsB
     /// Supported token:
     /// - "api_token"
     ///
-    /// # Panics
-    /// Panics if an unknown parameter key is provided.
+    /// # Panics    ///  if an unknown parameter key is provided.
     fn set_param(self: Box<Self>, key: &str, value: &str) -> Box<dyn DnsProviderBuilder<Output = DnsProviderImpl<T>>> {
         let mut this = *self;
         match key {
@@ -66,6 +68,118 @@ pub struct CloudFlareDns<T: DnsHttpClient> {
     api_token: String,
 }
 
+#[derive( Deserialize, Serialize)]
+struct RawCloudFlareResponse {
+    #[serde(rename = "result", default, deserialize_with = "deserialize_result", skip_serializing_if = "vec_is_empty")]
+    result: Vec<CloudFlareResult>,
+    #[serde(rename = "errors", default, skip_serializing_if = "is_empty_or_none")]
+    errors: Option<Vec<Value>>,
+    #[serde(rename = "messages", default, skip_serializing_if = "is_empty_or_none")]
+    messages: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "option_is_empty")]
+    result_info: Option<ResultInfo>,
+    success: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ResultInfo {
+    page: Option<usize>,
+    per_page: Option<usize>,
+    total_pages: Option<usize>,
+    count: Option<usize>,
+    total_count: Option<usize>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CloudFlareResult {
+    #[serde(rename = "account", default, skip_serializing_if = "option_is_empty")]
+    account: Option<Value>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+fn deserialize_result<'de, D>(deserializer: D) -> Result<Vec<CloudFlareResult>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ResultWrapper {
+        Single(CloudFlareResult),
+        Multiple(Vec<CloudFlareResult>),
+        Null
+    }
+
+    let wrapper = ResultWrapper::deserialize(deserializer)?;
+    Ok(match wrapper {
+        ResultWrapper::Single(record) => vec![record],
+        ResultWrapper::Multiple(records) => records,
+        ResultWrapper::Null => vec![]
+    })
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct CloudFlareResponse {
+    #[serde(rename = "Response", default, skip_serializing_if = "option_is_empty")]
+    response : Option<Response>,
+    #[serde(rename = "errors", default, skip_serializing_if = "is_empty_or_none")]
+    errors: Option<Vec<Value>>,
+    #[serde(rename = "messages", default, skip_serializing_if = "is_empty_or_none")]
+    messages: Option<Vec<Value>>,
+    #[serde(rename = "success", default)]
+    success: bool,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct Response {
+    #[serde(rename = "UserInfo", default, skip_serializing_if = "is_null_or_none")]
+    user_info: Option<Value>,
+    #[serde(rename = "DomainCountInfo", default, skip_serializing_if = "option_is_empty")]
+    domain_count_info: Option<DomainCountInfo>,
+    #[serde(rename = "DomainList", default, skip_serializing_if = "vec_is_empty")]
+    domain_list: Vec<DomainList>,
+    #[serde(rename = "RecordList", default, skip_serializing_if = "vec_is_empty")]
+    record_list: Vec<RecordList>,
+    #[serde(rename = "RecordInfo", default, skip_serializing_if = "option_is_empty")]
+    record_info: Option<RecordList>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct DomainCountInfo {
+    #[serde(rename = "AllTotal", default, skip_serializing_if = "is_null_or_none")]
+    all_total: Option<Value>,
+    #[serde(rename = "DomainTotal", default, skip_serializing_if = "is_null_or_none")]
+    domain_total: Option<Value>,
+    #[serde(rename = "RecordTotal", default, skip_serializing_if = "is_null_or_none")]
+    record_total: Option<Value>,
+    #[serde(rename = "MineTotal", default, skip_serializing_if = "is_null_or_none")]
+    mine_total: Option<Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DomainList {
+    #[serde(rename = "CreatedOn", default, skip_serializing_if = "is_null_or_none")]
+    created_on: Option<Value>,
+    #[serde(rename = "EffectiveDNS", default, skip_serializing_if = "is_empty_or_none")]
+    effective_dns: Option<Vec<Value>>,
+    #[serde(rename = "Name", default, skip_serializing_if = "is_null_or_none")]
+    name: Option<Value>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct RecordList {
+    #[serde(rename = "CreatedOn", default, skip_serializing_if = "is_null_or_none")]
+    created_on: Option<Value>,
+    #[serde(rename = "Name", default, skip_serializing_if = "is_null_or_none")]
+    name: Option<Value>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
 #[async_trait]
 impl<T: DnsHttpClient> DnsClient for CloudFlareDns<T> {
     /// Retrieves detailed information about the current user's zones.
@@ -73,45 +187,103 @@ impl<T: DnsHttpClient> DnsClient for CloudFlareDns<T> {
         let url = format!("{}/zones", self.api);
         let headers = build_headers(&self.api_token)?;
 
-        let response = self.http_client.request(Method::GET, url, headers, None).await?;
+        let resp = self.http_client.request(Method::GET, url, headers, None).await?;
 
-        Ok(response.to_string())
+        let raw: RawCloudFlareResponse = serde_json::from_str(&resp.to_string())?;
+
+        let final_response = CloudFlareResponse::from(raw);
+
+        Ok(to_string(&final_response)?)
 
     }
 
     /// Lists all domain names associated with the account, handling pagination.
     async fn describe_domain_name_list(&self) -> Result<String, Box<dyn Error>> {
-        let mut page = 1;
-        let mut all_zones = Vec::new();
+        let headers = build_headers(&self.api_token)?;
+        let all_zones = fetch_paginated_data(
+            &self.http_client,
+            &format!("{}/zones", self.api),
+            headers,
+            |resp| serde_json::from_str::<RawCloudFlareResponse>(&resp.to_string())
+                .map_err(|e| Box::new(e) as Box<dyn Error>),
+        )
+        .await?;
 
-        loop {
-            let url = format!("{}/zones?page={}&per_page=50", self.api, page);
-            let headers = build_headers(&self.api_token)?;
+        let domain_list: Vec<DomainList> = all_zones
+            .into_iter()
+            .map(|zone| {
+                let created_on = zone.extra.get("created_on")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1970-01-01T00:00:00Z");
 
-            let response = self.http_client.request(Method::GET, url, headers, None).await?;
+                let name = zone.extra.get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
 
-            let result_array = response
-                .get("result")
-                .and_then(|v| v.as_array())
-                .ok_or("Missing 'result' array in response")?;
+                let name_servers = zone.extra.get("name_servers")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+                    .unwrap_or_default();
 
-            all_zones.extend(result_array.iter().cloned());
+                let plan_name = zone.extra.get("plan")
+                    .and_then(|v| v.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown Plan");
 
-            let page_info = response
-                .get("result_info")
-                .ok_or("Missing 'result_info' in response")?;
+                let formatted_date = DateTime::parse_from_rfc3339(created_on)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
 
-            let current_page = page_info.get("page").and_then(|v| v.as_u64()).unwrap_or(1);
-            let total_pages = page_info.get("total_pages").and_then(|v| v.as_u64()).unwrap_or(1);
+                DomainList {
+                    created_on: Some(Value::String(formatted_date)),
+                    effective_dns: Some(
+                        name_servers
+                            .into_iter()
+                            .map(|s| Value::String(s))
+                            .collect::<Vec<Value>>()
+                    ),
+                    name: Some(Value::String(name.to_string())),
+                    extra: {
+                        let mut map = HashMap::new();
+                        map.insert("DomainId".to_string(), Value::String(
+                            zone.extra.get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        ));
+                        map.insert("Grade".to_string(), Value::String(
+                            match plan_name {
+                                "Free Website" => "DP_FREE",
+                                _ => "UNKNOWN"
+                            }.to_string()
+                        ));
+                        map.insert("GradeTitle".to_string(), Value::String(plan_name.to_string()));
+                        map.insert("RecordCount".to_string(), Value::Number(0.into()));
+                        map.insert("TTL".to_string(), Value::Number(600.into()));
+                        map.insert("IsVip".to_string(), Value::String("NO".to_string()));
+                        map.insert("GroupId".to_string(), Value::Number(1.into()));
+                        map
+                    }
+                }
+            })
+            .collect();
 
-            if current_page >= total_pages {
-                break;
-            }
+        let response = CloudFlareResponse {
+            response: Some(Response {
+                domain_count_info: Some(DomainCountInfo {
+                    all_total: Some(Value::Number(domain_list.len().into())),
+                    domain_total: Some(Value::Number(domain_list.len().into())),
+                    mine_total: Some(Value::Number(domain_list.len().into())),
+                    ..Default::default()
+                }),
+                domain_list,
+                ..Default::default()
+            }),
+            success: true,
+            ..Default::default()
+        };
 
-            page += 1;
-        }
-
-        Ok(serde_json::to_string_pretty(&all_zones)?)
+        Ok(to_string(&response)?)
     }
 
     /// Cloudflare does not support the concept of record lines, returns error.
@@ -126,91 +298,166 @@ impl<T: DnsHttpClient> DnsClient for CloudFlareDns<T> {
         });
 
         let headers = build_headers(&self.api_token)?;
-
         let zone_id = get_zone_id(&self.api, &self.api_token, &*params.domain).await?;
 
+        let all_records = fetch_paginated_data(
+            &self.http_client,
+            &format!("{}/zones/{}/dns_records", self.api, zone_id),
+            headers,
+            |resp| serde_json::from_str::<RawCloudFlareResponse>(&resp.to_string())
+                .map_err(|e| Box::new(e) as Box<dyn Error>),
+        )
+        .await?;
 
-        let mut page = 1;
-        let mut all_records = Vec::new();
+        let record_list: Vec<RecordList> = all_records
+            .into_iter()
+            .map(|zone| {
+                let created_on = zone.extra.get("created_on")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1970-01-01T00:00:00Z");
 
-        loop {
-            let url = format!("{}/zones/{}/dns_records?page={}&per_page=50", self.api, zone_id, page);
+                let name = zone.extra.get("Name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| if s.is_empty() { "@" } else { s })
+                    .unwrap_or("@");
 
-            let response = self.http_client.request(Method::GET, url, headers.clone(), None).await?;
+                let formatted_date = DateTime::parse_from_rfc3339(created_on)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
 
-            let result_array = response
-                .get("result")
-                .and_then(|v| v.as_array())
-                .ok_or("Missing 'result' array in DNS record response")?;
+                RecordList {
+                    created_on: Some(Value::String(formatted_date)),
+                    name: Some(Value::String(name.to_string())),
+                    extra: {
+                        let mut map = HashMap::new();
+                        map.insert("RecordId".to_string(), Value::String(
+                            zone.extra.get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        ));
+                        map.insert("Value".to_string(), Value::String(
+                            zone.extra.get("content")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        ));
+                        map
+                    }
+                }
+            })
+            .collect();
 
-            all_records.extend(result_array.iter().cloned());
+        let response = CloudFlareResponse {
+            response: Some(Response {
+                domain_count_info: Some(DomainCountInfo {
+                    all_total: Some(Value::Number(record_list.len().into())),
+                    record_total: Some(Value::Number(record_list.len().into())),
+                    mine_total: Some(Value::Number(record_list.len().into())),
+                    ..Default::default()
+                }),
+                record_list,
+                ..Default::default()
+            }),
+            success: true,
+            ..Default::default()
+        };
 
-            let page_info = response
-                .get("result_info")
-                .ok_or("Missing 'result_info'")?;
-
-            let current_page = page_info.get("page").and_then(|v| v.as_u64()).unwrap_or(1);
-            let total_pages = page_info.get("total_pages").and_then(|v| v.as_u64()).unwrap_or(1);
-
-            if current_page >= total_pages {
-                break;
-            }
-
-            page += 1;
-        }
-
-        Ok(serde_json::to_string_pretty(&all_records)?)
+        Ok(to_string(&response)?)
     }
 
-    /// Filters DNS records to only include those matching a specific subdomain.
     async fn describe_subdomain_record_list(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
-        let params = extract_params!(builder, RequestParams, {
-        required domain: String => "Domain",
-        required subdomain: String => "SubDomain"
-    });
-
-        let full_subdomain = format!("{}.{}", params.subdomain, params.domain);
-
-        let record_list_str = self.describe_record_list(builder).await?;
-
-        let mut records: serde_json::Value = serde_json::from_str(&record_list_str)?;
-
-        if let Some(array) = records.as_array_mut() {
-            array.retain(|record| record.get("name").map_or(false, |name| name == &full_subdomain));
-        }
-
-        Ok(to_string(&records)?)
-    }
-
-    /// Gets details for a specific DNS record identified by domain and subdomain.
-    async fn describe_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
             required subdomain: String => "SubDomain"
         });
 
-        let record_name = if params.subdomain== "@" {
-            params.domain.clone()
-        } else {
-            format!("{}.{}", params.subdomain, params.domain)
-        };
+        let record_list_str = self.describe_record_list(builder).await?;
+        let mut records: Value = serde_json::from_str(&record_list_str)?;
 
-        let headers = build_headers(&self.api_token)?;
-
-        let zone_id = get_zone_id(&self.api, &self.api_token, &*params.domain).await?;
-
-        let records_url = format!("{}/zones/{}/dns_records?name={}", self.api, zone_id, record_name);
-        let records_response = self.http_client.request(Method::GET, records_url, headers.clone(), None).await?;
-
-        let records = records_response
-            .get("result").and_then(|v| v.as_array())
-            .ok_or("Missing 'result' array for DNS records")?;
+        if let Some(Value::Array(array)) = records.pointer_mut("/Response/RecordList") {
+            array.retain(|record| {
+                record.get("Name")
+                    .and_then(|name| name.as_str())
+                    .map(|name_str| name_str == params.subdomain)
+                    .unwrap_or(false)
+            });
+        }
 
         Ok(to_string(&records)?)
-
     }
 
-    /// Creates a new DNS record with the specified parameters.
+    async fn describe_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
+        let params = extract_params!(builder, RequestParams, {
+            required domain: String => "Domain",
+            required record_id: String => "RecordId"
+        });
+
+        let headers = build_headers(&self.api_token)?;
+        let zone_id = get_zone_id(&self.api, &self.api_token, &*params.domain).await?;
+
+        let records_url = format!("{}/zones/{}/dns_records/{}", self.api, zone_id, params.record_id);
+        let raw = self.http_client.request(Method::GET, records_url, headers.clone(), None).await?;
+
+        let raw_value: RawCloudFlareResponse = serde_json::from_str(&raw.to_string())?;
+
+        if !raw_value.success {
+            return Ok(to_string(&CloudFlareResponse {
+                errors: raw_value.errors,
+                messages: raw_value.messages,
+                success: false,
+                ..Default::default()
+            })?);
+        }
+
+        let record_list: Option<RecordList> = raw_value.result.first().map(|zone| {
+            let created_on = zone.extra.get("created_on")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1970-01-01T00:00:00Z");
+
+            let name = zone.extra.get("Name")
+                .and_then(|v| v.as_str())
+                .map(|s| if s.is_empty() { "@" } else { s })
+                .unwrap_or("@");
+
+            let formatted_date = DateTime::parse_from_rfc3339(created_on)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+
+            RecordList {
+                created_on: Some(Value::String(formatted_date)),
+                name: Some(Value::String(name.to_string())),
+                extra: {
+                    let mut map = HashMap::new();
+                    map.insert("RecordId".to_string(), Value::String(
+                        zone.extra.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    ));
+                    map.insert("Value".to_string(), Value::String(
+                        zone.extra.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    ));
+                    map
+                }
+            }
+        });
+
+        let records_response = CloudFlareResponse {
+            response: Some(Response {
+                record_info: record_list,
+                ..Default::default()
+            }),
+            success: true,
+            ..Default::default()
+        };
+
+        Ok(to_string(&records_response)?)
+    }
+
     async fn create_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
@@ -228,30 +475,83 @@ impl<T: DnsHttpClient> DnsClient for CloudFlareDns<T> {
         };
 
         let headers = build_headers(&self.api_token)?;
-
         let zone_id = get_zone_id(&self.api, &self.api_token, &params.domain).await?;
 
         let body = serde_json::json!({
-        "type": params.record_type,
-        "name": record_name,
-        "content": params.value,
-        "ttl": params.ttl,
-        "proxied": params.proxied
-    });
+            "type": params.record_type,
+            "name": record_name,
+            "content": params.value,
+            "ttl": params.ttl,
+            "proxied": params.proxied
+        });
 
         let create_url = format!("{}/zones/{}/dns_records", self.api, zone_id);
-        let create_response = self.http_client
-            .request(Method::POST, create_url, headers, Some(body.to_string()))
-            .await?;
+        let raw = self.http_client.request(Method::POST, create_url, headers, Some(body.to_string())).await?;
 
-        Ok(create_response.to_string())
+        let raw_value: RawCloudFlareResponse = serde_json::from_str(&raw.to_string())?;
+
+        if !raw_value.success {
+            return Ok(to_string(&CloudFlareResponse {
+                errors: raw_value.errors,
+                messages: raw_value.messages,
+                success: false,
+                ..Default::default()
+            })?);
+        }
+
+        let record_list: Option<RecordList> = raw_value.result.first().map(|zone| {
+            let created_on = zone.extra.get("created_on")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1970-01-01T00:00:00Z");
+
+            let name = zone.extra.get("Name")
+                .and_then(|v| v.as_str())
+                .map(|s| if s.is_empty() { "@" } else { s })
+                .unwrap_or("@");
+
+            let formatted_date = DateTime::parse_from_rfc3339(created_on)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+
+            RecordList {
+                created_on: Some(Value::String(formatted_date)),
+                name: Some(Value::String(name.to_string())),
+                extra: {
+                    let mut map = HashMap::new();
+                    map.insert("RecordId".to_string(), Value::String(
+                        zone.extra.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    ));
+                    map.insert("Value".to_string(), Value::String(
+                        zone.extra.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    ));
+                    map
+                }
+            }
+        });
+
+        let records_response = CloudFlareResponse {
+            response: Some(Response {
+                record_info: record_list,
+                ..Default::default()
+            }),
+            success: true,
+            ..Default::default()
+        };
+
+        Ok(to_string(&records_response)?)
     }
 
-    /// Modifies an existing DNS record with new values.
     async fn modify_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
             required subdomain: String => "SubDomain",
+            required record_id: String => "RecordId",
             required record_type: String => "RecordType",
             required value: String => "Value",
             required proxied: bool => "Proxied",
@@ -265,30 +565,78 @@ impl<T: DnsHttpClient> DnsClient for CloudFlareDns<T> {
         };
 
         let headers = build_headers(&self.api_token)?;
-
         let zone_id = get_zone_id(&self.api, &self.api_token, &params.domain).await?;
 
-        let list_url = format!("{}/zones/{}/dns_records?type={}&name={}",
-                               self.api, zone_id, params.record_type, record_name);
-        let list_resp_text = self.http_client.request(Method::GET, list_url, headers.clone(), None).await?;
-
-        let record_id =list_resp_text["result"][0]["id"].as_str().ok_or("record_id not found")?;
-
         let body = serde_json::json!({
-        "type": params.record_type,
-        "name": record_name,
-        "content": params.value,
-        "ttl": params.ttl,
-        "proxied": params.proxied
-    });
+            "type": params.record_type,
+            "name": record_name,
+            "content": params.value,
+            "ttl": params.ttl,
+            "proxied": params.proxied
+        });
 
-        let modify_url = format!("{}/zones/{}/dns_records/{}", self.api, zone_id, record_id);
-        let modify_resp_text = self.http_client.request(Method::PUT, modify_url, headers, Some(body.to_string())).await?;
+        let modify_url = format!("{}/zones/{}/dns_records/{}", self.api, zone_id, params.record_id);
+        let raw = self.http_client.request(Method::PUT, modify_url, headers, Some(body.to_string())).await?;
 
-        Ok(modify_resp_text.to_string())
+        let raw_value: RawCloudFlareResponse = serde_json::from_str(&raw.to_string())?;
+
+        if !raw_value.success {
+            return Ok(to_string(&CloudFlareResponse {
+                errors: raw_value.errors,
+                messages: raw_value.messages,
+                success: false,
+                ..Default::default()
+            })?);
+        }
+
+        let record_list: Option<RecordList> = raw_value.result.first().map(|zone| {
+            let created_on = zone.extra.get("created_on")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1970-01-01T00:00:00Z");
+
+            let name = zone.extra.get("Name")
+                .and_then(|v| v.as_str())
+                .map(|s| if s.is_empty() { "@" } else { s })
+                .unwrap_or("@");
+
+            let formatted_date = DateTime::parse_from_rfc3339(created_on)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+
+            RecordList {
+                created_on: Some(Value::String(formatted_date)),
+                name: Some(Value::String(name.to_string())),
+                extra: {
+                    let mut map = HashMap::new();
+                    map.insert("RecordId".to_string(), Value::String(
+                        zone.extra.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    ));
+                    map.insert("Value".to_string(), Value::String(
+                        zone.extra.get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    ));
+                    map
+                }
+            }
+        });
+
+        let records_response = CloudFlareResponse {
+            response: Some(Response {
+                record_info: record_list,
+                ..Default::default()
+            }),
+            success: true,
+            ..Default::default()
+        };
+
+        Ok(to_string(&records_response)?)
     }
 
-    /// Deletes one or more DNS records based on domain, subdomain, and optionally record ID.
     async fn delete_record(&self, builder: &RecordOperationBuilder) -> Result<String, Box<dyn Error>> {
         let params = extract_params!(builder, RequestParams, {
             required domain: String => "Domain",
@@ -297,71 +645,178 @@ impl<T: DnsHttpClient> DnsClient for CloudFlareDns<T> {
         });
 
         let headers = build_headers(&self.api_token)?;
-
         let zone_id = get_zone_id(&self.api, &self.api_token, &params.domain).await?;
 
-        if !params.record_id.is_empty() {
-            let delete_url = format!("{}/zones/{}/dns_records/{}", self.api, zone_id, params.record_id);
-            let delete_resp = self.http_client
-                .request(Method::DELETE, delete_url, headers, None)
-                .await?;
-            return Ok(delete_resp.to_string());
-        }
+        let record_ids = if !params.record_id.is_empty() {
+            vec![params.record_id]
+        } else {
+            let subdomain_resp = self.describe_subdomain_record_list(builder).await?;
+            let parsed: CloudFlareResponse = serde_json::from_str(&subdomain_resp)
+                .map_err(|e| format!("Failed to resolve subdomain record: {}\nOriginal response: {}", e, subdomain_resp))?;
 
-        let subdomain_list_str = self.describe_subdomain_record_list(builder).await?;
+            let records = parsed
+                .response
+                .ok_or("The response field is missing")?
+                .record_list;
 
-        // Parse JSON string into array
-        let records: serde_json::Value = serde_json::from_str(&subdomain_list_str)?;
-        let Some(array) = records.as_array() else {
-            return Err("Expected JSON array of records".into());
+            let record_ids: Vec<String> = records
+                .into_iter()
+                .filter_map(|r| {
+                    r.extra.get("RecordId")?.as_str().map(|s| s.to_string())
+                })
+                .collect();
+
+            record_ids
         };
 
-        let mut deleted = Vec::new();
+        let mut record_list = Vec::new();
 
-        for record in array {
-            let record_name = record.get("name").and_then(|n| n.as_str());
-            let expected_name = if params.subdomain == "@" {
-                &params.domain
-            } else {
-                &format!("{}.{}", params.subdomain, params.domain)
-            };
+        for id in record_ids {
+            let delete_url = format!("{}/zones/{}/dns_records/{}", self.api, zone_id, id);
+            let delete_resp = self.http_client
+                .request(Method::DELETE, delete_url, headers.clone(), None)
+                .await?;
 
-            if record_name == Some(expected_name) {
-                if let Some(record_id) = record.get("id").and_then(|id| id.as_str()) {
-                    let delete_url = format!("{}/zones/{}/dns_records/{}", self.api, zone_id, record_id);
-                    let delete_resp = self.http_client
-                        .request(Method::DELETE, delete_url, headers.clone(), None)
-                        .await?;
-                    deleted.push(delete_resp.to_string());
-                }
-            }
+            let resp_json: Value = serde_json::from_str(&delete_resp.to_string())?;
+            let record_id = resp_json["result"]["id"].clone();
+            let success = resp_json["success"].as_bool().unwrap_or(false);
+            let errors = resp_json["errors"].clone();
+
+            let mut extra: HashMap<String, Value> = HashMap::new();
+            extra.insert("id".to_string(), record_id);
+            extra.insert("success".to_string(), Value::Bool(success));
+            extra.insert("errors".to_string(), errors);
+
+            record_list.push(RecordList {
+                extra,
+                ..Default::default()
+            });
         }
 
-        Ok(format!("Deleted records: {}", deleted.join(", ")))
+        let response = CloudFlareResponse {
+            response: Some(Response {
+                record_list,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        Ok(to_string(&response)?)
     }
+}
+
+async fn fetch_paginated_data<T, F>(
+    http_client: &T,
+    base_url: &str,
+    headers: HeaderMap,
+    parse_response: F,
+) -> Result<Vec<CloudFlareResult>, Box<dyn Error>>
+where
+    T: DnsHttpClient,
+    F: Fn(String) -> Result<RawCloudFlareResponse, Box<dyn Error>>,
+{
+    let mut page = 1;
+    let mut all_data = Vec::new();
+
+    loop {
+        let url = format!("{}?page={}&per_page=50", base_url, page);
+        let response_text = http_client.request(Method::GET, url, headers.clone(), None).await?;
+        let response_value: RawCloudFlareResponse = parse_response(response_text.to_string())?;
+
+        if !response_value.result.is_empty() {
+            all_data.extend(response_value.result);
+        }
+
+        let page_info = response_value.result_info.ok_or("Missing 'result_info' in response")?;
+        let current_page = page_info.page.unwrap_or(1);
+        let total_pages = page_info.total_pages.unwrap_or(1);
+
+        if current_page >= total_pages {
+            break;
+        }
+
+        page += 1;
+    }
+
+    Ok(all_data)
 }
 
 fn build_headers(token: &str) -> Result<HeaderMap, Box<dyn Error>> {
     let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", "application/json".parse()?);
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
     headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", token))?);
     Ok(headers)
 }
 
-/// Retrieves the zone ID for a given domain name.
-async fn get_zone_id(api_url : &str, api_token: &str, domain: &str) -> Result<String, Box<dyn Error>> {
+async fn get_zone_id(api_url: &str, api_token: &str, domain: &str) -> Result<String, Box<dyn Error>> {
     let http_client = DefaultDnsClient::new();
     let headers = build_headers(api_token)?;
 
     let zone_url = format!("{}/zones?name={}", api_url, domain);
+    let zone_resp = http_client.request(Method::GET, zone_url, headers.clone(), None).await?;
 
-    let zone_resp = http_client
-        .request(Method::GET, zone_url, headers.clone(), None)
-        .await?;
     let zone_id = zone_resp["result"][0]["id"]
         .as_str()
         .ok_or("zone_id not found")?;
 
     Ok(zone_id.to_string())
+}
 
+impl From<RawCloudFlareResponse> for CloudFlareResponse {
+    fn from(raw: RawCloudFlareResponse) -> Self {
+        let response = raw.result.first().and_then(|first| {
+            first.account.as_ref().map(|account| Response {
+                user_info: Some(account.clone()),
+                domain_count_info: None,
+                domain_list: vec![],
+                record_list: vec![],
+                record_info: None,
+            })
+        });
+
+        CloudFlareResponse {
+            response,
+            errors: raw.errors,
+            messages: raw.messages,
+            success: raw.success,
+        }
+    }
+}
+
+impl CloudFlareResult {
+    fn to_record_list(&self) -> Result<RecordList, Box<dyn Error>> {
+        let created_on = self.extra.get("created_on")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing created_on field")?;
+
+        let name = self.extra.get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| if s.is_empty() { "@" } else { s })
+            .unwrap_or("@");
+
+        let formatted_date = DateTime::parse_from_rfc3339(created_on)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+
+        Ok(RecordList {
+            created_on: Some(Value::String(formatted_date)),
+            name: Some(Value::String(name.to_string())),
+            extra: {
+                let mut map = HashMap::new();
+                map.insert("RecordId".to_string(), Value::String(
+                    self.extra.get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                ));
+                map.insert("Value".to_string(), Value::String(
+                    self.extra.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                ));
+                map
+            }
+        })
+    }
 }
