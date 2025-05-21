@@ -23,7 +23,6 @@
 /// - `json_keyX` is the key name for the field in JSON
 /// - `default_value` is the default value for optional fields
 ///
-#[macro_export]
 macro_rules! extract_params {
     // Parse type helper: match with conversion or without conversion, conversion must be wrapped in parentheses
     (@type ( $src_ty:ident as $conv_ty:ty )) => { $conv_ty };
